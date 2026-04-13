@@ -158,10 +158,12 @@ export async function POST(request: NextRequest) {
   return NextResponse.json({ contact: mapRowToContact(contact, segments) }, { status: 201 });
 }
 
-// Batch import contacts
+// Batch import contacts — uses bulk insert for speed
 async function handleBatchImport(contacts: Record<string, unknown>[]) {
-  let imported = 0;
-  let skippedDuplicates = 0;
+  const db = getSupabase();
+
+  // 1. Validate all rows and normalize emails
+  const validRows: { row: Record<string, unknown>; email: string; segments: string[] }[] = [];
   let errors = 0;
 
   for (const row of contacts) {
@@ -170,50 +172,79 @@ async function handleBatchImport(contacts: Record<string, unknown>[]) {
       errors++;
       continue;
     }
+    const segments = (row.segments as string[]) || [];
+    validRows.push({ row, email, segments });
+  }
 
-    // Check duplicate
-    const { data: existing } = await getSupabase()
+  // 2. Fetch all existing emails in one query to check duplicates
+  const allEmails = validRows.map((r) => r.email);
+  const { data: existingRows } = await db
+    .from('contacts')
+    .select('email')
+    .in('email', allEmails);
+
+  const existingEmails = new Set(
+    (existingRows || []).map((r) => (r.email as string).toLowerCase())
+  );
+
+  // Split into new vs duplicate
+  const newRows = validRows.filter((r) => !existingEmails.has(r.email));
+  const skippedDuplicates = validRows.length - newRows.length;
+
+  if (newRows.length === 0) {
+    return NextResponse.json({
+      totalProcessed: contacts.length,
+      imported: 0,
+      skippedDuplicates,
+      errors,
+    });
+  }
+
+  // 3. Bulk insert contacts in batches of 100
+  const BATCH_SIZE = 100;
+  let imported = 0;
+  const insertedContacts: { id: string; segments: string[] }[] = [];
+
+  for (let i = 0; i < newRows.length; i += BATCH_SIZE) {
+    const batch = newRows.slice(i, i + BATCH_SIZE);
+    const insertData = batch.map(({ row, email }) => ({
+      email,
+      first_name: (row.firstName as string) || '',
+      last_name: (row.lastName as string) || '',
+      status: (row.status as string) || 'confirmed',
+      source: (row.source as string) || 'csvImport',
+      phone: (row.phone as string) || null,
+      last_ip: (row.lastIp as string) || null,
+      last_open: (row.lastOpen as string) || null,
+      interest: (row.interest as string) || null,
+      lifecycle_stage: (row.lifecycleStage as string) || 'Explorer',
+      lead_score: (row.leadScore as number) ?? 0,
+      program_history: (row.programHistory as string[]) || [],
+    }));
+
+    const { data: inserted, error } = await db
       .from('contacts')
-      .select('id')
-      .ilike('email', email)
-      .maybeSingle();
-
-    if (existing) {
-      skippedDuplicates++;
-      continue;
-    }
-
-    const { data: contact, error } = await getSupabase()
-      .from('contacts')
-      .insert({
-        email,
-        first_name: (row.firstName as string) || '',
-        last_name: (row.lastName as string) || '',
-        status: (row.status as string) || 'confirmed',
-        source: (row.source as string) || 'csvImport',
-        phone: row.phone || null,
-        last_ip: row.lastIp || null,
-        last_open: row.lastOpen || null,
-        interest: row.interest || null,
-        lifecycle_stage: row.lifecycleStage || 'Explorer',
-        lead_score: row.leadScore ?? 0,
-        program_history: row.programHistory || [],
-      })
-      .select('id')
-      .single();
+      .insert(insertData)
+      .select('id');
 
     if (error) {
-      errors++;
+      errors += batch.length;
       continue;
     }
 
-    // Handle segments
-    const segments = (row.segments as string[]) || [];
-    if (segments.length > 0 && contact) {
-      await assignSegments(contact.id, segments);
-    }
+    imported += (inserted || []).length;
 
-    imported++;
+    // Track which contacts need segments
+    (inserted || []).forEach((contact, idx) => {
+      if (batch[idx].segments.length > 0) {
+        insertedContacts.push({ id: contact.id, segments: batch[idx].segments });
+      }
+    });
+  }
+
+  // 4. Bulk assign segments
+  if (insertedContacts.length > 0) {
+    await bulkAssignSegments(insertedContacts);
   }
 
   return NextResponse.json({
@@ -224,29 +255,64 @@ async function handleBatchImport(contacts: Record<string, unknown>[]) {
   });
 }
 
-// Find or create segments, then link to contact
-async function assignSegments(contactId: string, segmentNames: string[]) {
-  for (const name of segmentNames) {
-    // Find or create the segment
-    let { data: seg } = await getSupabase()
-      .from('segments')
-      .select('id')
-      .ilike('name', name.trim())
-      .maybeSingle();
+// Bulk find-or-create segments, then link to contacts
+async function bulkAssignSegments(
+  contactSegments: { id: string; segments: string[] }[]
+) {
+  const db = getSupabase();
 
-    if (!seg) {
-      const { data: newSeg } = await getSupabase()
-        .from('segments')
-        .insert({ name: name.trim(), type: 'manual' })
-        .select('id')
-        .single();
-      seg = newSeg;
-    }
-
-    if (seg) {
-      await getSupabase()
-        .from('contact_segments')
-        .upsert({ contact_id: contactId, segment_id: seg.id }, { onConflict: 'contact_id,segment_id' });
+  // Collect all unique segment names
+  const allNames = new Set<string>();
+  for (const cs of contactSegments) {
+    for (const s of cs.segments) {
+      allNames.add(s.trim());
     }
   }
+
+  // Fetch existing segments
+  const { data: existingSegs } = await db
+    .from('segments')
+    .select('id, name');
+
+  const segMap = new Map<string, string>();
+  for (const seg of existingSegs || []) {
+    segMap.set(seg.name.toLowerCase(), seg.id);
+  }
+
+  // Create missing segments
+  const missingNames = [...allNames].filter((n) => !segMap.has(n.toLowerCase()));
+  if (missingNames.length > 0) {
+    const { data: newSegs } = await db
+      .from('segments')
+      .insert(missingNames.map((name) => ({ name, type: 'manual' })))
+      .select('id, name');
+
+    for (const seg of newSegs || []) {
+      segMap.set(seg.name.toLowerCase(), seg.id);
+    }
+  }
+
+  // Build junction table rows
+  const junctionRows: { contact_id: string; segment_id: string }[] = [];
+  for (const cs of contactSegments) {
+    for (const s of cs.segments) {
+      const segId = segMap.get(s.trim().toLowerCase());
+      if (segId) {
+        junctionRows.push({ contact_id: cs.id, segment_id: segId });
+      }
+    }
+  }
+
+  // Bulk insert junction rows in batches
+  for (let i = 0; i < junctionRows.length; i += 500) {
+    const batch = junctionRows.slice(i, i + 500);
+    await db
+      .from('contact_segments')
+      .upsert(batch, { onConflict: 'contact_id,segment_id' });
+  }
+}
+
+// Find or create segments, then link to contact (single contact)
+async function assignSegments(contactId: string, segmentNames: string[]) {
+  await bulkAssignSegments([{ id: contactId, segments: segmentNames }]);
 }
