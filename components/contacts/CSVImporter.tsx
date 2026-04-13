@@ -97,13 +97,33 @@ export default function CSVImporter() {
     });
 
     try {
-      const res = await fetch('/api/contacts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contacts }),
-      });
-      const result: ImportResult = await res.json();
-      setImportResult(result);
+      // Send in chunks of 50 to avoid Vercel function timeout
+      const CHUNK_SIZE = 50;
+      const totals: ImportResult = {
+        totalProcessed: contacts.length,
+        imported: 0,
+        skippedDuplicates: 0,
+        errors: 0,
+      };
+
+      for (let i = 0; i < contacts.length; i += CHUNK_SIZE) {
+        const chunk = contacts.slice(i, i + CHUNK_SIZE);
+        const res = await fetch('/api/contacts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contacts: chunk }),
+        });
+        if (res.ok) {
+          const result = await res.json();
+          totals.imported += result.imported || 0;
+          totals.skippedDuplicates += result.skippedDuplicates || 0;
+          totals.errors += result.errors || 0;
+        } else {
+          totals.errors += chunk.length;
+        }
+      }
+
+      setImportResult(totals);
     } catch {
       setImportResult({
         totalProcessed: contacts.length,
