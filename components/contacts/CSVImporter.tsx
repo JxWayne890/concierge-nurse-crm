@@ -71,16 +71,50 @@ export default function CSVImporter() {
     setStep('validation');
   };
 
-  const handleImport = () => {
-    // Stub: in production this would call an API
-    const result: ImportResult = {
-      totalProcessed: rows.length,
-      imported: validation?.valid.length || 0,
-      skippedDuplicates: validation?.duplicates.length || 0,
-      errors: validation?.errors.length || 0,
-    };
-    setImportResult(result);
-    setStep('results');
+  const [importing, setImporting] = useState(false);
+
+  const handleImport = async () => {
+    if (!validation) return;
+    setImporting(true);
+
+    // Map validated rows to contact objects using the column mappings
+    const contacts = validation.valid.map((row) => {
+      const mapped: Record<string, unknown> = {};
+      for (const m of mappings) {
+        if (m.crmField && row[m.csvColumn] !== undefined) {
+          if (m.crmField === 'segments') {
+            mapped.segments = (row[m.csvColumn] || '').split(',').map((s: string) => s.trim()).filter(Boolean);
+          } else if (m.crmField === 'externalId') {
+            // skip — we generate our own IDs
+          } else {
+            mapped[m.crmField] = row[m.csvColumn];
+          }
+        }
+      }
+      if (!mapped.source) mapped.source = 'csvImport';
+      if (!mapped.status) mapped.status = 'confirmed';
+      return mapped;
+    });
+
+    try {
+      const res = await fetch('/api/contacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contacts }),
+      });
+      const result: ImportResult = await res.json();
+      setImportResult(result);
+    } catch {
+      setImportResult({
+        totalProcessed: contacts.length,
+        imported: 0,
+        skippedDuplicates: 0,
+        errors: contacts.length,
+      });
+    } finally {
+      setImporting(false);
+      setStep('results');
+    }
   };
 
   const reset = () => {
@@ -320,8 +354,8 @@ export default function CSVImporter() {
             <Button variant="outline" onClick={() => setStep('validation')} className="gap-1">
               <ArrowLeft size={14} /> Back
             </Button>
-            <Button onClick={handleImport} className="gap-1">
-              <CheckCircle2 size={14} /> Import {validation.valid.length} Contacts
+            <Button onClick={handleImport} disabled={importing} className="gap-1">
+              <CheckCircle2 size={14} /> {importing ? 'Importing...' : `Import ${validation.valid.length} Contacts`}
             </Button>
           </div>
         </Card>
