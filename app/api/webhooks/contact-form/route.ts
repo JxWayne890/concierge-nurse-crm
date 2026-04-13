@@ -1,58 +1,93 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import type { ContactFormPayload } from '@/lib/types';
-
-function validateWebhookSecret(request: NextRequest): boolean {
-  const secret = request.headers.get('x-webhook-secret');
-  // Stub: compare against process.env.WEBHOOK_SECRET
-  return !!secret;
-}
+import {
+  validateWebhookSecret,
+  unauthorizedResponse,
+  validationErrorResponse,
+  createdResponse,
+  updatedResponse,
+  validateEmail,
+  isValidInterest,
+  mapInterest,
+  findContactByEmail,
+  createContact,
+  updateContact,
+  appendTag,
+  logWebhook,
+  logActivity,
+  addNote,
+} from '@/lib/webhook';
 
 export async function POST(request: NextRequest) {
   if (!validateWebhookSecret(request)) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    return unauthorizedResponse();
   }
 
   let body: ContactFormPayload;
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
+    return validationErrorResponse({ body: 'Invalid JSON' });
   }
 
   // Validate required fields
-  if (!body.email || !body.firstName || !body.lastName) {
-    return NextResponse.json(
-      { error: 'Missing required fields: email, firstName, lastName' },
-      { status: 400 }
-    );
+  const errors: Record<string, string> = {};
+  if (!body.first_name?.trim()) errors.first_name = 'First name is required';
+  if (!body.last_name?.trim()) errors.last_name = 'Last name is required';
+  if (!body.email?.trim()) errors.email = 'Valid email is required';
+  else if (!validateEmail(body.email)) errors.email = 'Valid email is required';
+  if (!body.interest) errors.interest = 'Interest is required';
+  else if (!isValidInterest(body.interest)) errors.interest = 'Interest must be a valid option';
+
+  if (Object.keys(errors).length > 0) {
+    logWebhook('/api/webhooks/contact-form', body as unknown as Record<string, unknown>, 400);
+    return validationErrorResponse(errors);
   }
 
-  // Validate email format
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
-    return NextResponse.json({ error: 'Invalid email format' }, { status: 400 });
+  const email = body.email.toLowerCase().trim();
+  const existing = findContactByEmail(email);
+  const tag = 'Contact Form Lead';
+  const interest = mapInterest(body.interest);
+
+  if (existing) {
+    // Update existing contact — fill empty fields, never overwrite populated ones
+    const updates: Partial<typeof existing> = {
+      segments: appendTag(existing, tag),
+      interest: interest,
+    };
+    if (!existing.firstName && body.first_name) updates.firstName = body.first_name.trim();
+    if (!existing.lastName && body.last_name) updates.lastName = body.last_name.trim();
+
+    updateContact(existing.id, updates);
+
+    if (body.message?.trim()) {
+      addNote(existing.id, body.message.trim());
+    }
+
+    logActivity(existing.id, 'form_submission', `Submitted contact form with interest: ${interest}`, body);
+    logWebhook('/api/webhooks/contact-form', body as unknown as Record<string, unknown>, 200);
+    return updatedResponse(existing.id);
   }
 
-  // Stub: Check for duplicate email in database
-  // const existing = await db.contacts.findByEmail(body.email);
-  // if (existing) {
-  //   return NextResponse.json({ error: 'Contact already exists', contactId: existing.id }, { status: 409 });
-  // }
+  // Create new contact
+  const contact = createContact({
+    email,
+    firstName: body.first_name.trim(),
+    lastName: body.last_name.trim(),
+    status: 'confirmed',
+    source: 'formSubmission',
+    segments: [tag],
+    interest,
+    lifecycleStage: 'Explorer',
+    leadScore: 0,
+    programHistory: [],
+  });
 
-  // Stub: Create contact in database
-  const contact = {
-    id: crypto.randomUUID(),
-    email: body.email,
-    firstName: body.firstName,
-    lastName: body.lastName,
-    source: 'webhook' as const,
-    status: 'unconfirmed' as const,
-    interest: body.interest,
-    segments: ['Contact Form Lead'],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
+  if (body.message?.trim()) {
+    addNote(contact.id, body.message.trim());
+  }
 
-  console.log('[Webhook] Contact form submission:', contact);
-
-  return NextResponse.json({ message: 'Contact created', contact }, { status: 201 });
+  logActivity(contact.id, 'form_submission', `Submitted contact form with interest: ${interest}`, body);
+  logWebhook('/api/webhooks/contact-form', body as unknown as Record<string, unknown>, 201);
+  return createdResponse(contact.id);
 }

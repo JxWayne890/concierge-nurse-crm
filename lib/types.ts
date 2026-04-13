@@ -29,6 +29,8 @@ export interface Contact {
   lifecycleStage?: LifecycleStage;
   programHistory?: string[];
   leadScore?: number;
+  businessName?: string;
+  annualRevenue?: string;
 }
 
 export interface Note {
@@ -149,21 +151,72 @@ export interface ImportResult {
   errors: number;
 }
 
+// Webhook interest enum (snake_case values from website forms)
+export type WebhookInterest =
+  | 'clarity_consult'
+  | 'accelerator_cohort'
+  | 'toolkits_resources'
+  | 'private_coaching'
+  | 'business_consulting'
+  | 'vip_bridge_session'
+  | 'general_question'
+  | 'other';
+
+// Shared metadata auto-attached to every webhook payload from the website
+export interface WebhookSharedMetadata {
+  source: string;
+  submitted_at: string;
+  page_url: string;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  referrer: string | null;
+}
+
 // Webhook payloads
-export interface ContactFormPayload {
-  firstName: string;
-  lastName: string;
+export interface ContactFormPayload extends WebhookSharedMetadata {
+  source: 'contact_form';
+  first_name: string;
+  last_name: string;
   email: string;
-  interest: InterestType;
+  interest: WebhookInterest;
+  message?: string;
+}
+
+export interface ConsultingInquiryPayload extends WebhookSharedMetadata {
+  source: 'consulting_inquiry';
+  full_name: string;
+  email: string;
+  business_name?: string;
+  annual_revenue?: string;
+  biggest_challenge?: string;
+}
+
+export interface AcceleratorWaitlistPayload extends WebhookSharedMetadata {
+  source: 'accelerator_waitlist';
+  full_name: string;
+  email: string;
+}
+
+export type SubscribeSource = 'community_page' | 'community_section' | 'footer_newsletter';
+
+export interface SubscribePayload extends WebhookSharedMetadata {
+  source: SubscribeSource;
+  first_name?: string | null;
+  email: string;
+}
+
+// Consistent webhook response format
+export interface WebhookSuccessResponse {
+  status: 'created' | 'updated';
+  contact_id: string;
   message: string;
 }
 
-export interface WaitlistPayload {
-  fullName: string;
-  email: string;
+export interface WebhookErrorResponse {
+  status: 'error';
+  message: string;
+  errors?: Record<string, string>;
 }
 
-export interface CommunitySignupPayload {
-  email: string;
-  firstName?: string;
-}
+export type WebhookResponse = WebhookSuccessResponse | WebhookErrorResponse;

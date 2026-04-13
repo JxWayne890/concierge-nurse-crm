@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { Copy, Check, Download, Key, Phone, Mail } from 'lucide-react';
+import Link from 'next/link';
+import { Copy, Check, Download, Key, Phone, Mail, TestTube } from 'lucide-react';
 import Header from '@/components/layout/Header';
 import Card from '@/components/ui/Card';
 import Input from '@/components/ui/Input';
@@ -23,9 +24,10 @@ function CopyButton({ text }: { text: string }) {
 }
 
 const webhookEndpoints = [
-  { name: 'Contact Form', path: '/api/webhooks/contact-form', description: 'Captures contact form submissions' },
-  { name: 'Waitlist', path: '/api/webhooks/waitlist', description: 'Captures Accelerator waitlist signups' },
-  { name: 'Community Signup', path: '/api/webhooks/community-signup', description: 'Captures email list signups' },
+  { name: 'Contact Form', path: '/api/webhooks/contact-form', description: 'Captures contact form submissions from /contact' },
+  { name: 'Consulting Inquiry', path: '/api/webhooks/consulting-inquiry', description: 'Captures consulting inquiry submissions from /consulting' },
+  { name: 'Accelerator Waitlist', path: '/api/webhooks/accelerator-waitlist', description: 'Captures Accelerator waitlist signups from /accelerator' },
+  { name: 'Subscribe', path: '/api/webhooks/subscribe', description: 'Captures newsletter & community signups (footer, community page, community section)' },
 ];
 
 export default function SettingsPage() {
@@ -114,7 +116,14 @@ export default function SettingsPage() {
             <Key size={20} className="text-gold" />
             <h3 className="text-lg font-semibold text-charcoal">Webhook URLs</h3>
           </div>
-          <p className="text-sm text-slate mb-4">Add these endpoints to your public website to capture form submissions.</p>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-sm text-slate">Add these endpoints to your public website to capture form submissions.</p>
+            <Link href="/settings/webhooks/test">
+              <Button variant="outline" size="sm" className="gap-1.5">
+                <TestTube size={14} /> Test Webhooks
+              </Button>
+            </Link>
+          </div>
           <div className="space-y-3">
             {webhookEndpoints.map(({ name, path, description }) => (
               <div key={path} className="flex items-center gap-3 rounded-lg border border-gray-200 p-3">
