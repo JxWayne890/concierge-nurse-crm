@@ -200,27 +200,38 @@ async function handleBatchImport(contacts: Record<string, unknown>[]) {
     });
   }
 
-  // 3. Bulk insert contacts in batches of 100
-  const BATCH_SIZE = 100;
+  // 3. Insert contacts — try batch first, fall back to one-by-one on failure
+  const VALID_STATUSES = new Set(['confirmed', 'unconfirmed', 'unsubscribed', 'bounced']);
+  const VALID_SOURCES = new Set(['manualUpload', 'webhook', 'csvImport', 'formSubmission']);
+
+  function sanitizeRow(row: Record<string, unknown>, email: string) {
+    const status = (row.status as string) || '';
+    const source = (row.source as string) || '';
+    const lastOpen = (row.lastOpen as string) || null;
+
+    return {
+      email,
+      first_name: (row.firstName as string) || '',
+      last_name: (row.lastName as string) || '',
+      status: VALID_STATUSES.has(status) ? status : 'confirmed',
+      source: VALID_SOURCES.has(source) ? source : 'csvImport',
+      phone: (row.phone as string) || null,
+      last_ip: (row.lastIp as string) || null,
+      last_open: lastOpen && !isNaN(Date.parse(lastOpen)) ? lastOpen : null,
+      interest: null,
+      lifecycle_stage: 'Explorer',
+      lead_score: 0,
+      program_history: [] as string[],
+    };
+  }
+
+  const BATCH_SIZE = 50;
   let imported = 0;
   const insertedContacts: { id: string; segments: string[] }[] = [];
 
   for (let i = 0; i < newRows.length; i += BATCH_SIZE) {
     const batch = newRows.slice(i, i + BATCH_SIZE);
-    const insertData = batch.map(({ row, email }) => ({
-      email,
-      first_name: (row.firstName as string) || '',
-      last_name: (row.lastName as string) || '',
-      status: (row.status as string) || 'confirmed',
-      source: (row.source as string) || 'csvImport',
-      phone: (row.phone as string) || null,
-      last_ip: (row.lastIp as string) || null,
-      last_open: (row.lastOpen as string) || null,
-      interest: (row.interest as string) || null,
-      lifecycle_stage: (row.lifecycleStage as string) || 'Explorer',
-      lead_score: (row.leadScore as number) ?? 0,
-      program_history: (row.programHistory as string[]) || [],
-    }));
+    const insertData = batch.map(({ row, email }) => sanitizeRow(row, email));
 
     const { data: inserted, error } = await db
       .from('contacts')
@@ -228,7 +239,24 @@ async function handleBatchImport(contacts: Record<string, unknown>[]) {
       .select('id');
 
     if (error) {
-      errors += batch.length;
+      // Batch failed — try inserting one by one to save what we can
+      for (let j = 0; j < batch.length; j++) {
+        const singleData = sanitizeRow(batch[j].row, batch[j].email);
+        const { data: single, error: singleErr } = await db
+          .from('contacts')
+          .insert(singleData)
+          .select('id')
+          .single();
+
+        if (singleErr) {
+          errors++;
+        } else if (single) {
+          imported++;
+          if (batch[j].segments.length > 0) {
+            insertedContacts.push({ id: single.id, segments: batch[j].segments });
+          }
+        }
+      }
       continue;
     }
 
